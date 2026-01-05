@@ -1,1 +1,3 @@
 # ZxBanUserbot
+
+DONT DOWNLOAD IT!!! ITS BETA ALL
