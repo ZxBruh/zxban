@@ -8,7 +8,6 @@ except ImportError:
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import MessageEntityCustomEmoji
 
-# Данные API
 API_ID = 2040
 API_HASH = 'b18441a1ff607e10a989891a5462e627'
 CONFIG_FILE = 'config.json'
@@ -17,30 +16,47 @@ MODULES_DIR = 'modules'
 if not os.path.exists(MODULES_DIR): os.makedirs(MODULES_DIR)
 
 def load_config():
+    # Генерируем случайное имя, если его еще нет
+    rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    default = {
+        "prefix": "!",
+        "bot_token": "",
+        "bot_username": f"zxban_{rand_suffix}_bot",
+        "info_template": "🛡️ **Zxban Status**",
+        "ping_template": "⚡ **Pong!** `{time}` ms"
+    }
+    
     if not os.path.exists(CONFIG_FILE):
-        # Генерируем случайный юзернейм для подсказки
-        rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        default = {
-            "prefix": "!",
-            "bot_token": "", # Сюда нужно будет вставить токен
-            "bot_username": f"zxban_{rand_suffix}",
-            "info_template": "🛡️ **Zxban Status**",
-            "ping_template": "⚡ **Pong!** `{time}` ms"
-        }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=4)
+        return default
+    
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        current = json.load(f)
+    
+    # ПРОВЕРКА И ДОБАВЛЕНИЕ НЕДОСТАЮЩИХ КЛЮЧЕЙ (чтобы не было KeyError)
+    updated = False
+    for key, value in default.items():
+        if key not in current:
+            current[key] = value
+            updated = True
+    
+    if updated:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(current, f, ensure_ascii=False, indent=4)
+            
+    return current
 
 cfg = load_config()
-
-# Клиент юзербота
 client = TelegramClient('zxban_session', API_ID, API_HASH)
-# Клиент вспомогательного бота (запустится только если есть токен)
 bot_client = None
 
+# Пытаемся запустить бота-помощника для кнопок
 if cfg.get("bot_token"):
-    bot_client = TelegramClient('zxban_bot', API_ID, API_HASH).start(bot_token=cfg["bot_token"])
+    try:
+        bot_client = TelegramClient('zxban_bot', API_ID, API_HASH).start(bot_token=cfg["bot_token"])
+    except Exception as e:
+        print(f"Ошибка запуска бота: {e}")
 
 loaded_modules = {}
 
@@ -66,14 +82,10 @@ async def main_handler(event):
     cmd = args[0].lower()
 
     if cmd == "кфг":
-        if not cfg.get("bot_token"):
-            await event.edit(f"⚠️ **Кнопки не работают!**\nДля работы меню мне нужен Inline-бот.\n\n1. Напиши @BotFather\n2. Создай бота: `/{cfg['bot_username']}`\n3. Получи токен и напиши:\n`!set_token ТВОЙ_ТОКЕН`")
-            return
-        
-        # Если токен есть, используем Inline Query или отправку через бота
-        # В режиме юзербота кнопки отправляются через «switch_inline»
-        await event.edit(f"⚙️ **Настройки Zxban**\nИспользуйте кнопки ниже:", 
-            buttons=[
+        if not bot_client:
+            await event.edit(f"⚠️ **Кнопки не работают!**\n\n1. Перейди в @BotFather\n2. Создай бота с юзернеймом: `@{cfg['bot_username']}`\n3. Получи API токен и введи команду:\n`!set_token ТВОЙ_ТОКЕН`")
+        else:
+            await event.edit("⚙️ **Настройки Zxban**\nВыберите категорию:", buttons=[
                 [Button.inline("📦 Встроенные", data="mods_int")],
                 [Button.inline("🌐 Внешние", data="mods_ext")]
             ])
@@ -82,7 +94,7 @@ async def main_handler(event):
         if len(args) > 1:
             cfg['bot_token'] = args[1]
             with open(CONFIG_FILE, "w") as f: json.dump(cfg, f)
-            await event.edit("✅ **Токен сохранен! Перезагружаюсь для активации кнопок...**")
+            await event.edit("✅ **Токен применен! Перезагружаюсь...**")
             os.execl(sys.executable, sys.executable, *sys.argv)
 
     elif cmd == "пинг":
@@ -97,27 +109,27 @@ async def main_handler(event):
         subprocess.Popen(["git", "pull"], stdout=subprocess.PIPE).communicate()
         os.execl(sys.executable, sys.executable, *sys.argv)
 
-# Обработка нажатий на кнопки (через бот-аккаунт)
+# Слушаем кнопки через бот-аккаунт
 if bot_client:
     @bot_client.on(events.CallbackQuery)
     async def callback_handler(event):
         data = event.data.decode()
         if data == "mods_int":
-            await event.edit("🛠 **Встроенные модули:**\n• Core\n• Loader\n• Config", buttons=[Button.inline("⬅️ Назад", data="back")])
+            await event.edit("🛠 **Встроенные модули:**\n• Core\n• Loader\n• Update", buttons=[Button.inline("⬅️ Назад", data="back")])
         elif data == "mods_ext":
-            mods = "\n".join([f"• {m}" for m in loaded_modules.keys()]) or "Нет"
+            mods = "\n".join([f"• {m}" for m in loaded_modules.keys()]) or "Пусто"
             await event.edit(f"📂 **Внешние модули:**\n{mods}", buttons=[Button.inline("⬅️ Назад", data="back")])
         elif data == "back":
             await event.edit("⚙️ **Настройки Zxban**", buttons=[
-                [Button.inline("📦 Встроенные", data="mods_int")],
-                [Button.inline("🌐 Внешние", data="mods_ext")]
+                [Button.inline("📦 Встроенные", data="mods_int")], [Button.inline("🌐 Внешние", data="mods_ext")]
             ])
 
 async def main():
-    for file in os.listdir(MODULES_DIR):
-        if file.endswith(".py"): load_module(os.path.join(MODULES_DIR, file))
+    if os.path.exists(MODULES_DIR):
+        for file in os.listdir(MODULES_DIR):
+            if file.endswith(".py"): load_module(os.path.join(MODULES_DIR, file))
     await client.start()
-    print("Zxban запущен!")
+    print("Zxban запущен и готов к работе!")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
