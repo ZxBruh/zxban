@@ -1,4 +1,5 @@
-import time, json, os, sys, subprocess, importlib, random, string
+
+import time, json, os, sys, subprocess, importlib, asyncio
 try:
     import requests
 except ImportError:
@@ -6,7 +7,6 @@ except ImportError:
     import requests
 
 from telethon import TelegramClient, events, Button, functions, types
-from telethon.tl.types import MessageEntityCustomEmoji
 
 # --- КОНФИГУРАЦИЯ ---
 API_ID = 2040
@@ -15,137 +15,105 @@ CONFIG_FILE = 'config.json'
 MODULES_DIR = 'modules'
 
 def load_config():
-    default = {
-        "prefix": "!",
-        "bot_token": "",
-        "bot_username": "",
-        "info_template": "🛡️ **Zxban Status: Online**",
-        "ping_template": "⚡ **Pong!** `{time}` ms"
-    }
+    default = {"prefix": "!", "bot_token": "", "bot_username": ""}
     if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=4)
+        with open(CONFIG_FILE, "w") as f: json.dump(default, f)
         return default
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        current = json.load(f)
-    for k, v in default.items():
-        if k not in current: current[k] = v
-    return current
+    return json.load(open(CONFIG_FILE))
 
 cfg = load_config()
 client = TelegramClient('zxban_session', API_ID, API_HASH)
-bot_client = None
-
 loaded_modules = {}
 
-def load_module(file_path):
-    module_name = os.path.basename(file_path)[:-3]
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        loaded_modules[module_name] = mod
-        print(f"✅ Модуль {module_name} загружен")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка в модуле {module_name}: {e}")
-        return False
+# --- ФУНКЦИЯ АВТО-НАСТРОЙКИ BOTFATHER ---
+async def setup_bot_inline(bot_username):
+    print(f"🛠 Пытаюсь включить Inline Mode для @{bot_username} через BotFather...")
+    async with client.conversation("@BotFather") as conv:
+        await conv.send_message("/setinline")
+        await asyncio.sleep(1)
+        await conv.send_message(f"@{bot_username}")
+        await asyncio.sleep(1)
+        await conv.send_message("Zxban Mode") 
+        print(f"✅ Инлайн режим для @{bot_username} должен быть включен!")
+
+# --- ЗАГРУЗЧИК МОДУЛЕЙ ---
+def load_modules():
+    if not os.path.exists(MODULES_DIR): os.makedirs(MODULES_DIR)
+    for file in os.listdir(MODULES_DIR):
+        if file.endswith(".py"):
+            name = file[:-3]
+            try:
+                spec = importlib.util.spec_from_file_location(name, f"{MODULES_DIR}/{file}")
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                for attr in dir(mod):
+                    handler = getattr(mod, attr)
+                    if hasattr(handler, 'callback'): client.add_event_handler(handler)
+                loaded_modules[name] = mod
+            except Exception as e: print(f"❌ Ошибка в {name}: {e}")
 
 @client.on(events.NewMessage(outgoing=True))
-async def main_handler(event):
+async def manager(event):
     global cfg
+    text = event.raw_text
     prefix = cfg.get("prefix", "!")
-    if not event.raw_text.startswith(prefix): return
-    args = event.raw_text[len(prefix):].split()
-    if not args: return
-    cmd = args[0].lower()
+    if not text.startswith(prefix): return
+    
+    cmd = text[len(prefix):].split()[0].lower()
+    args = text.split()[1:]
 
     if cmd == "кфг":
-        if not cfg.get("bot_token") or not cfg.get("bot_username"):
-            await event.edit("⚠️ Токен или Username бота не настроены! Введи `!set_token <токен>`.")
-            return
         await event.delete()
         try:
-            results = await client.inline_query(cfg['bot_username'], 'config_menu')
-            if results:
-                await results[0].click(event.chat_id)
-        except Exception as e:
-            print(f"Inline error: {e}")
+            res = await client.inline_query(cfg['bot_username'], 'config_menu')
+            await res[0].click(event.chat_id)
+        except:
+            await client.send_message("me", "❌ Ошибка: Инлайн-режим еще не активирован. Попробуй через 5 секунд.")
 
     elif cmd == "set_token":
-        if len(args) > 1:
-            token = args[1]
-            await event.edit("⏳ Проверка токена...")
-            try:
-                # Временный запуск бота для получения инфы
-                temp_bot = TelegramClient('temp_session', API_ID, API_HASH)
-                await temp_bot.start(bot_token=token)
-                bot_me = await temp_bot.get_me()
-                await temp_bot.disconnect()
-
-                cfg['bot_token'] = token
-                cfg['bot_username'] = bot_me.username
-                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=4)
-                
-                await event.edit(f"✅ Токен привязан к **@{bot_me.username}**! Перезагрузка...")
-                os.execl(sys.executable, sys.executable, *sys.argv)
-            except Exception as e:
-                await event.edit(f"❌ Ошибка: {e}")
-        else:
-            await event.edit("📝 Используй: `!set_token <твой_токен>`")
-
-# --- ЛОГИКА БОТА (ИНЛАЙН И КНОПКИ) ---
-async def start_bot():
-    global bot_client
-    if cfg.get("bot_token"):
-        try:
-            bot_client = TelegramClient('zxban_bot', API_ID, API_HASH)
-            await bot_client.start(bot_token=cfg["bot_token"])
+        token = args[0]
+        req = requests.get(f"https://api.telegram.org/bot{token}/getMe").json()
+        if req.get("ok"):
+            bot_user = req["result"]["username"]
+            cfg.update({"bot_token": token, "bot_username": bot_user})
+            with open(CONFIG_FILE, "w") as f: json.dump(cfg, f)
             
-            @bot_client.on(events.InlineQuery)
-            async def inline_handler(event):
-                if event.text == 'config_menu':
-                    await event.answer([
-                        event.builder.article('Settings', text='⚙️ **Настройки Zxban**', buttons=[
-                            [Button.inline("📦 Встроенные", data="mods_int")],
-                            [Button.inline("🌐 Внешние", data="mods_ext")]
-                        ])
-                    ])
+            await event.edit(f"⏳ Привязываю @{bot_user} и включаю Inline Mode...")
+            await setup_bot_inline(bot_user)
+            
+            await event.edit(f"✅ Всё готово! Бот @{bot_user} настроен. Перезагрузка...")
+            await asyncio.sleep(2)
+            os.execl(sys.executable, sys.executable, *sys.argv)
+        else:
+            await event.edit("❌ Токен не валиден!")
 
-            @bot_client.on(events.CallbackQuery)
-            async def cb_handler(event):
-                if event.data == b"mods_int":
-                    await event.edit("🛠 **Встроенные модули:**\n• Core\n• Loader\n• Update", 
-                                     buttons=[[Button.inline("🌐 Внешние", data="mods_ext")]])
-                elif event.data == b"mods_ext":
-                    buttons = []
-                    mod_names = list(loaded_modules.keys())
-                    if not mod_names:
-                        await event.answer("Нет загруженных модулей", alert=True)
-                        return
-                    for i in range(0, len(mod_names), 2):
-                        row = [Button.inline(f"🧩 {name}", data=f"modinfo_{name}") for name in mod_names[i:i+2]]
-                        buttons.append(row)
-                    buttons.append([Button.inline("📦 Встроенные", data="mods_int")])
-                    await event.edit("📂 **Список внешних модулей:**", buttons=buttons)
-                elif event.data.startswith(b"modinfo_"):
-                    mod_name = event.data.decode().split("_")[1]
-                    await event.answer(f"Модуль {mod_name} активен", alert=True)
-        except Exception as e:
-            print(f"Ошибка запуска бота: {e}")
+# --- ИНЛАЙН БОТ ---
+async def start_bot():
+    if not cfg.get("bot_token"): return
+    bot = TelegramClient('zxban_bot_session', API_ID, API_HASH)
+    await bot.start(bot_token=cfg["bot_token"])
+    
+    @bot.on(events.InlineQuery)
+    async def i_handler(event):
+        if event.text == 'config_menu':
+            await event.answer([event.builder.article('Zxban', text='⚙️ Меню управления', buttons=[
+                [Button.inline("📦 Модули", data="m_list")],
+                [Button.inline("🔄 Рестарт", data="reboot")]
+            ])])
+
+    @bot.on(events.CallbackQuery)
+    async def cb(event):
+        if event.data == b"m_list":
+            mods = "\n".join([f"• {m}" for m in loaded_modules.keys()]) or "Пусто"
+            await event.edit(f"🧩 **Загруженные модули:**\n{mods}", buttons=[Button.inline("⬅️ Назад", data="back")])
+        elif event.data == b"reboot":
+            os.execl(sys.executable, sys.executable, *sys.argv)
 
 async def main():
-    if not os.path.exists(MODULES_DIR):
-        os.makedirs(MODULES_DIR)
-    
-    for file in os.listdir(MODULES_DIR):
-        if file.endswith(".py"): 
-            load_module(os.path.join(MODULES_DIR, file))
-            
+    load_modules()
     await client.start()
     await start_bot()
-    print(f"Zxban запущен!")
+    print("🚀 Zxban запущен и готов к работе!")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
